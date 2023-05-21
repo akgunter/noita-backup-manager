@@ -37,6 +37,10 @@ import typing
 from xml.etree import ElementTree
 
 
+__version_info__ = ('0','9', '0')
+__version__ = '.'.join(__version_info__)
+
+
 @dataclasses.dataclass
 class ToolConfig:
     game_data_path: str
@@ -50,13 +54,14 @@ class ToolConfig:
 
     @staticmethod
     def _initialize(config_path: str) -> 'ToolConfig':
-        msg = "Path to Noita's save data (i.e. Nolla_Games_Noita):\n"
+        msg = "Enter the path to Noita's save data (i.e. Nolla_Games_Noita):\n"
         game_data_path = os.path.normpath(input(msg).rstrip("\\/"))
 
         default_backup_path = os.path.join(game_data_path, "backups")
-        msg = f"\nDesired backup location [{default_backup_path}]:\n"
-        backup_data_path = os.path.normpath(input(msg).rstrip("\\/"))
+        msg = f"\nEnter your desired backup location [{default_backup_path}]:\n"
+        backup_data_path = input(msg)
         backup_data_path = default_backup_path if backup_data_path == "" else backup_data_path
+        backup_data_path = os.path.normpath(backup_data_path).rstrip("\\/")
 
         tool_config = ToolConfig(
             game_data_path=game_data_path,
@@ -210,6 +215,8 @@ class BackupInfo:
 class ListCommands:
     @staticmethod
     def retrieve_all_backup_info(tool_config: ToolConfig) -> typing.List[BackupInfo]:
+        print(tool_config.backup_data_path)
+
         try:
             paths = [
                 os.path.join(tool_config.backup_data_path, p)
@@ -449,7 +456,7 @@ class RestoreCommands:
             print(f"No backup found for session ID {args.session_id} and {word} {key}")
             return
 
-        description = f"Snapshot of Slot {args.slot_id}"
+        description = f"Automatic backup of Slot {args.slot_id}"
         BackupCommands.create_new_backup(tool_config, args.slot_id, description)
 
         source_backup = existing_backups[key]
@@ -509,6 +516,12 @@ class ModifyCommands:
 def init_parser():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()
+
+    parser.add_argument(
+        "--version",
+        action='version',
+        version=f'%(prog)s {__version__}'
+    )
 
     list_parser = subparsers.add_parser("list", help="list available session IDs or backup IDs")
     list_group = list_parser.add_mutually_exclusive_group()
