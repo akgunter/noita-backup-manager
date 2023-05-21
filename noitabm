@@ -1,0 +1,632 @@
+#!/usr/bin/env python3
+
+"""
+MIT License
+
+Copyright (c) 2023 Alex Gunter <akg7634@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+
+import argparse
+import configparser
+import dataclasses
+import datetime
+import hashlib
+import os
+import re
+import shutil
+import typing
+from xml.etree import ElementTree
+
+
+@dataclasses.dataclass
+class ToolConfig:
+    game_data_path: str
+    backup_data_path: str
+
+    @staticmethod
+    def _expected_config_path() -> str:
+        source_path = os.path.realpath(__file__).rstrip("\\/")
+        dir_path = os.path.dirname(source_path)
+        return os.path.join(dir_path, "noitabm.ini")
+
+    @staticmethod
+    def _initialize(config_path: str) -> 'ToolConfig':
+        msg = "Path to Noita's save data (i.e. Nolla_Games_Noita):\n"
+        game_data_path = os.path.normpath(input(msg).rstrip("\\/"))
+
+        default_backup_path = os.path.join(game_data_path, "backups")
+        msg = f"\nDesired backup location [{default_backup_path}]:\n"
+        backup_data_path = os.path.normpath(input(msg).rstrip("\\/"))
+        backup_data_path = default_backup_path if backup_data_path == "" else backup_data_path
+
+        tool_config = ToolConfig(
+            game_data_path=game_data_path,
+            backup_data_path=backup_data_path
+        )
+        config = configparser.ConfigParser()
+        config.read_dict({"PATHS": tool_config.__dict__})
+
+        with open(config_path, 'w') as fobj:
+            config.write(fobj)
+
+        return tool_config
+
+    @staticmethod
+    def load() -> 'ToolConfig':
+        config_path = ToolConfig._expected_config_path()
+        try:
+            with open(config_path, 'r') as fobj:
+                config = configparser.ConfigParser()
+                config.read_file(fobj)
+                return ToolConfig(**config["PATHS"])
+        except IOError:
+            print(f"{config_path} not found. Creating a new one...\n")
+            return ToolConfig._initialize(config_path)
+
+    def slot_path(self, slot_id: int) -> str:
+        return os.path.join(self.game_data_path, f"save{slot_id:02d}")
+
+    def world_state_path(self, slot_id: int) -> str:
+        return os.path.join(self.slot_path(slot_id), "world_state.xml")
+
+    def extract_session_id(self, slot_id: int) -> str:
+        state_path = self.world_state_path(slot_id)
+        tree = ElementTree.parse(state_path)
+        session_string = (
+            tree.getroot()
+                .find('WorldStateComponent')
+                .attrib['session_stat_file']
+        )
+        return re.findall(r"^\?\?STA/sessions/([0-9]{8}-[0-9]{6})$", session_string)[0]
+
+    @staticmethod
+    def backup_dirname(session_id: str, backup_id: str) -> str:
+        return f"{session_id}_{backup_id}"
+
+    def backup_path(self, session_id: str, backup_id: str) -> str:
+        return f"{self.backup_data_path}/{ToolConfig.backup_dirname(session_id, backup_id)}"
+
+
+# === UTILITY FUNCTIONS ===
+class IdLib:
+    @staticmethod
+    def id_from_datetime(ts: datetime.datetime) -> str:
+        return ts.strftime("%Y%m%d-%H%M%S")
+
+    @staticmethod
+    def new_id() -> str:
+        return IdLib.id_from_datetime(datetime.datetime.now())
+
+    @staticmethod
+    def hash_directory(base_path: str, ignore: typing.Set[str]) -> str:
+        """
+        Constructs a git-style SHA1 hash for a directory.
+        Hash will change if files are added, renamed or modified.
+        """
+
+        path_filehash_pairs = {}
+
+        # Iterate through directory
+        # Add (relative_path, file_hash) pairs to lookup table
+        for subdir, dirs, files in os.walk(base_path):
+            for fname in files:
+                full_path = os.path.join(subdir, fname)
+                relative_path = "/" + full_path.removeprefix(base_path).lstrip("/")
+                with open(full_path, 'rb') as fobj:
+                    fhash = hashlib.sha1(fobj.read()).digest()
+                    path_filehash_pairs[relative_path] = fhash
+
+        # Iterate through (relative_path, file_hash) pairs in alphanumeric order
+        # Add all pairs to hasher and return cumulative hash
+        dir_hash_obj = hashlib.sha1()
+        for rpath in sorted(path_filehash_pairs.keys()):
+            found_in_ignore = False
+            for patt in ignore:
+                patt = re.sub(r"^/", r"^/", patt)
+                patt = re.sub(r"\.", r"\.", patt)
+                patt = re.sub(r"\*", r".", patt)
+                if re.search(patt, rpath) is not None:
+                    found_in_ignore = True
+                    break
+
+            if found_in_ignore:
+                continue
+
+            encoded_rpath = os.fsencode(rpath)
+            dir_hash_obj.update(encoded_rpath)
+            dir_hash_obj.update(os.fsencode("\n"))
+            dir_hash_obj.update(path_filehash_pairs[rpath])
+
+        return dir_hash_obj.hexdigest()
+
+    @staticmethod
+    def short_hash(long_hash: str) -> str:
+        return long_hash[:7]
+
+
+@dataclasses.dataclass
+class BackupInfo:
+    session_id: str
+    backup_id: str
+    contents_hash: str
+    description: str
+
+    @staticmethod
+    def _get_config_path(backup_root_path: str) -> str:
+        return f"{backup_root_path}/backup_info.txt"
+
+    @staticmethod
+    def path_contains_backup(backup_root_path: str) -> bool:
+        return os.path.exists(BackupInfo._get_config_path(backup_root_path))
+
+    @staticmethod
+    def from_root_path(backup_root_path: str) -> 'BackupInfo':
+        config_path = BackupInfo._get_config_path(backup_root_path)
+        config = configparser.ConfigParser()
+        config.read(config_path)
+
+        return BackupInfo(**config['INFO'])
+
+    @staticmethod
+    def construct_contents_hash(save_data_path: str) -> str:
+        return IdLib.hash_directory(save_data_path, ignore={"/backup_info.txt"})
+
+    @property
+    def contents_shorthash(self):
+        return IdLib.short_hash(self.contents_hash)
+
+    def backup_path(self, tool_config: ToolConfig) -> str:
+        return tool_config.backup_path(self.session_id, self.backup_id)
+
+    def config_path(self, tool_config: ToolConfig) -> str:
+        return BackupInfo._get_config_path(self.backup_path(tool_config))
+
+    def to_config(self) -> configparser.ConfigParser:
+        config = configparser.ConfigParser()
+        config.read_dict({"INFO": self.__dict__})
+        return config
+
+
+# === LIST SUBCOMMAND ===
+class ListCommands:
+    @staticmethod
+    def retrieve_all_backup_info(tool_config: ToolConfig) -> typing.List[BackupInfo]:
+        try:
+            paths = [
+                os.path.join(tool_config.backup_data_path, p)
+                for p in os.listdir(tool_config.backup_data_path)
+            ]
+            return [
+                BackupInfo.from_root_path(p) for p in paths
+                if os.path.isdir(p)
+                and BackupInfo.path_contains_backup(p)
+            ]
+
+        except FileNotFoundError:
+            return []
+
+    @staticmethod
+    def retrieve_session_ids(tool_config: ToolConfig) -> typing.List[str]:
+        all_backup_info = ListCommands.retrieve_all_backup_info(tool_config)
+        return list(sorted({b.session_id for b in all_backup_info}))
+
+    @staticmethod
+    def retrieve_session_backup_info(tool_config: ToolConfig, session_id: str) -> typing.List[BackupInfo]:
+        return [
+            b for b in ListCommands.retrieve_all_backup_info(tool_config)
+            if b.session_id == session_id
+        ]
+
+    @staticmethod
+    def print_session_id_list(session_info: typing.List[str]):
+        if len(session_info) == 0:
+            print("No backups found...")
+            return
+
+        print(f"Found backups for {len(session_info)} session(s):\n")
+        print("    SESSION ID")
+        print("    ----------")
+        for s in sorted(session_info):
+            print(f"    {s}")
+
+    @staticmethod
+    def print_session_backup_info(session_id: int, backup_info: typing.List[BackupInfo]):
+        if len(backup_info) == 0:
+            print(f"No backups found for session {session_id}...")
+            return
+
+        backup_id_header = "BACKUP ID"
+        backup_id_maxlen = max(len(backup_id_header), max(len(b.backup_id) for b in backup_info))
+        shorthash_header = "SHORT HASH"
+        shorthash_maxlen = max(len(shorthash_header), 7)
+        # longhash_header = "LONG HASH"
+        # longhash_maxlen = max(len(longhash_header), 40)
+        desc_header = "DESCRIPTION"
+        header_str = (
+                "    " +
+                backup_id_header + " " * (backup_id_maxlen - len(backup_id_header)) + "    " +
+                shorthash_header + " " * (shorthash_maxlen - len(shorthash_header)) + "    " +
+                # longhash_header + " " * (longhash_maxlen - len(longhash_header)) + "    " +
+                desc_header
+        )
+
+        backup_info_strings = [
+            "    " +
+            b.backup_id + " " * (backup_id_maxlen - len(b.backup_id)) + "    " +
+            b.contents_shorthash + " " * (shorthash_maxlen - len(b.contents_shorthash)) + "    " +
+            # b.contents_hash + " " * (longhash_maxlen - len(b.contents_hash)) + "    " +
+            b.description
+            for b in backup_info
+        ]
+
+        print(f"Found {len(backup_info)} backups for session {session_id}:\n")
+        print(header_str)
+        print("    " + "-" * (backup_id_maxlen + shorthash_maxlen + len(desc_header) + 8))
+        for b_str in sorted(backup_info_strings):
+            print(b_str)
+
+    @staticmethod
+    def print_all_backup_info(tool_config: ToolConfig):
+        from itertools import groupby
+
+        all_backup_info = list(sorted(ListCommands.retrieve_all_backup_info(tool_config), key=lambda b: b.session_id))
+        all_backup_info = groupby(all_backup_info, lambda b: b.session_id)
+        all_backup_info = {k: list(sorted(v, key=lambda b: b.backup_id)) for k, v in all_backup_info}
+        session_info = list(sorted(all_backup_info.keys()))
+
+        num_sessions = len(session_info)
+        num_backups = sum(len(b) for b in all_backup_info.values())
+
+        session_id_header = "SESSION ID"
+        session_id_maxlen = max(len(session_id_header), max(len(sid) for sid in session_info))
+        backup_id_header = "BACKUP ID"
+        backup_id_maxlen = max(
+            len(backup_id_header),
+            max(len(b.backup_id) for b_inf in all_backup_info.values() for b in b_inf)
+        )
+        shorthash_header = "SHORT HASH"
+        shorthash_maxlen = max(len(shorthash_header), 7)
+        # longhash_header = "LONG HASH"
+        # longhash_maxlen = max(len(longhash_header), 40)
+        desc_header = "DESCRIPTION"
+        header_str = (
+                "    " +
+                session_id_header + " " * (session_id_maxlen - len(session_id_header)) + "    " +
+                backup_id_header + " " * (backup_id_maxlen - len(backup_id_header)) + "    " +
+                shorthash_header + " " * (shorthash_maxlen - len(shorthash_header)) + "    " +
+                # longhash_header + " " * (longhash_maxlen - len(longhash_header)) + "    " +
+                desc_header
+        )
+
+        print(f"Displaying {num_backups} backup(s) across {num_sessions} session(s):\n")
+        print(header_str)
+        print("    " + "-" * (session_id_maxlen + backup_id_maxlen + shorthash_maxlen + len(desc_header) + 12))
+        for session_id in sorted(session_info):
+            backup_info = all_backup_info[session_id]
+            if len(backup_info) == 0:
+                pass
+
+            b0 = backup_info[0]
+            first_info_string = (
+                    "    " +
+                    b0.session_id + " " * (session_id_maxlen - len(b0.session_id)) + "    " +
+                    b0.backup_id + " " * (backup_id_maxlen - len(b0.backup_id)) + "    " +
+                    b0.contents_shorthash + " " * (shorthash_maxlen - len(b0.contents_shorthash)) + "    " +
+                    # b0.contents_hash + " " * (longhash_maxlen - len(b.contents_hash)) + "    " +
+                    b0.description
+            )
+            print(first_info_string)
+
+            if len(backup_info) >= 2:
+                remaining_info_strings = [
+                    "    " +
+                    " " * backup_id_maxlen + "    " +
+                    b.backup_id + " " * (backup_id_maxlen - len(b.backup_id)) + "    " +
+                    b.contents_shorthash + " " * (shorthash_maxlen - len(b.contents_shorthash)) + "    " +
+                    # b0.contents_hash + " " * (longhash_maxlen - len(b.contents_hash)) + "    " +
+                    b.description
+                    for b in backup_info[1:]
+                ]
+                for s in remaining_info_strings:
+                    print(s)
+
+    @staticmethod
+    def print_config(tool_config: ToolConfig):
+        print("Displaying values from noitabm.ini:")
+        for k, v in sorted(tool_config.__dict__.items()):
+            print(f"    {k}: {v}")
+
+    @staticmethod
+    def run_list_command(tool_config, args: argparse.Namespace):
+        if args.config:
+            ListCommands.print_config(tool_config)
+        elif args.all:
+            ListCommands.print_all_backup_info(tool_config)
+        elif args.session_id is None:
+            session_info = ListCommands.retrieve_session_ids(tool_config)
+            ListCommands.print_session_id_list(session_info)
+        else:
+            selected_backup_info = ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
+            ListCommands.print_session_backup_info(args.session_id, selected_backup_info)
+
+
+# === BACKUP SUBCOMMAND ===
+class BackupCommands:
+    @staticmethod
+    def create_new_backup(tool_config: ToolConfig, slot_id: int, description: str):
+        slot_path = tool_config.slot_path(slot_id)
+
+        session_id = tool_config.extract_session_id(slot_id)
+        backup_id = IdLib.new_id()
+        contents_hash = BackupInfo.construct_contents_hash(slot_path)
+
+        backup_info = BackupInfo(
+            session_id=session_id,
+            backup_id=backup_id,
+            contents_hash=contents_hash,
+            description=description
+        )
+        backup_path = backup_info.backup_path(tool_config)
+        config_path = backup_info.config_path(tool_config)
+
+        print(f"Creating new backup...")
+
+        existing_hashes = {b.contents_hash: b for b in
+                           ListCommands.retrieve_session_backup_info(tool_config, session_id)}
+        if contents_hash in existing_hashes:
+            b = existing_hashes[contents_hash]
+            print(f"Slot {slot_id} has already been backed up.")
+            print(f"    Existing Session ID: {b.session_id}")
+            print(f"    Existing Backup ID: {b.backup_id}")
+            print(f"    Existing Short Hash: {b.contents_shorthash}")
+            print(f"    Existing Long Hash: {b.contents_hash}")
+            print(f"    Existing Description: {b.description}")
+            return
+
+        print(f"    Slot ID: {slot_id}")
+        print(f"    Session ID: {backup_info.session_id}")
+        print(f"    Backup ID: {backup_info.backup_id}")
+        print(f"    Short Hash: {backup_info.contents_shorthash}")
+        print(f"    Long Hash: {backup_info.contents_hash}")
+        print(f"    Description: {backup_info.description}")
+        print(f"    Src: {slot_path}")
+        print(f"    Dst: {backup_path}")
+        print(f"    Info: {config_path}")
+        shutil.copytree(slot_path, backup_path)
+        with open(config_path, 'w') as fobj:
+            backup_config = backup_info.to_config()
+            backup_config.write(fobj)
+        print()
+        print("    Backup complete")
+
+    @staticmethod
+    def run_backup_command(tool_config: ToolConfig, args: argparse.Namespace):
+        BackupCommands.create_new_backup(tool_config, args.slot_id, args.description)
+
+
+# === RESTORE SUBCOMMAND ===
+class RestoreCommands:
+    @staticmethod
+    def restore_backup(tool_config: ToolConfig, args: argparse.Namespace):
+        def get_key(b: BackupInfo):
+            return (
+                b.backup_id if args.backup_id is not None
+                else b.contents_shorthash if args.short_hash is not None
+                else b.contents_hash
+            )
+
+        key = next(x for x in (args.backup_id, args.short_hash, args.long_hash) if x is not None)
+        existing_backups = {
+            get_key(b): b
+            for b in ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
+        }
+
+        if key not in existing_backups:
+            word = (
+                "backup ID" if args.backup_id is not None
+                else "short-hash" if args.short_hash is not None
+                else "long-hash"
+            )
+            print(f"No backup found for session ID {args.session_id} and {word} {key}")
+            return
+
+        description = f"Snapshot of Slot {args.slot_id}"
+        BackupCommands.create_new_backup(tool_config, args.slot_id, description)
+
+        source_backup = existing_backups[key]
+        source_path = source_backup.backup_path(tool_config)
+        target_path = tool_config.slot_path(args.slot_id)
+
+        print(f"Cleaning Slot {args.slot_id}..")
+        shutil.rmtree(target_path)
+        print(f"Restoring backup to Slot {args.slot_id}...")
+        shutil.copytree(source_path, target_path)
+        print("Restoration complete")
+
+
+class ModifyCommands:
+    @staticmethod
+    def modify_backup(tool_config: ToolConfig, args: argparse.Namespace):
+        selected_backups = ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
+
+        if args.backup_id is not None:
+            backup_info = next(filter(lambda b: b.backup_id == args.backup_id, selected_backups))
+        elif args.short_hash is not None:
+            backup_info = next(filter(lambda b: b.contents_shorthash == args.short_hash, selected_backups))
+        else:
+            backup_info = next(filter(lambda b: b.contents_hash == args.long_hash, selected_backups))
+
+        print("Found specified backup:")
+        print(f"    Session ID: {backup_info.session_id}")
+        print(f"    Backup ID: {backup_info.backup_id}")
+        print(f"    Short Hash: {backup_info.contents_shorthash}")
+        print(f"    Long Hash: {backup_info.contents_hash}")
+        print(f"    Description: {backup_info.description}")
+
+        if args.hash:
+            print("Recalculating hash...")
+            new_hash = BackupInfo.construct_contents_hash(backup_info.backup_path(tool_config))
+            backup_info.contents_hash = new_hash
+
+        if args.description:
+            print("Updating description...")
+            backup_info.description = args.description
+
+        config_path = backup_info.config_path(tool_config)
+        with open(config_path, 'w') as fobj:
+            backup_config = backup_info.to_config()
+            backup_config.write(fobj)
+
+        reloaded_backup_info = BackupInfo.from_root_path(backup_info.backup_path(tool_config))
+        print("\nSuccessfully updated backup:")
+        print(f"    Session ID: {reloaded_backup_info.session_id}")
+        print(f"    Backup ID: {reloaded_backup_info.backup_id}")
+        print(f"    Short Hash: {reloaded_backup_info.contents_shorthash}")
+        print(f"    Long Hash: {reloaded_backup_info.contents_hash}")
+        print(f"    Description: {reloaded_backup_info.description}")
+
+
+# === PARSER SETUP ===
+def init_parser():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers()
+
+    list_parser = subparsers.add_parser("list", help="list available session IDs or backup IDs")
+    list_group = list_parser.add_mutually_exclusive_group()
+    list_group.add_argument(
+        "-c", "--config",
+        help="list the values in noitabm.ini",
+        action="store_true"
+    )
+    list_group.add_argument(
+        "-a", "--all",
+        help="list all backups for all sessions",
+        action="store_true"
+    )
+    list_group.add_argument(
+        "session_id",
+        help="list backup IDs for the specified session ID",
+        type=str,
+        nargs='?'
+    )
+    list_parser.set_defaults(func=ListCommands.run_list_command)
+
+    backup_parser = subparsers.add_parser("backup", help="create a new backup from the specified slot")
+    backup_parser.add_argument(
+        "slot_id",
+        help="the save slot to backup (default: 0)",
+        type=int,
+        nargs='?',
+        choices=list(range(7)),
+        default=0,
+        const=0
+    )
+    backup_parser.add_argument(
+        "-d", "--description",
+        help="Add a description to the backup, so you can easily identify it later",
+        type=str,
+        default=""
+    )
+    backup_parser.set_defaults(func=BackupCommands.run_backup_command)
+
+    restore_parser = subparsers.add_parser("restore", help="restore the specified backup to the specified slot")
+    restore_parser.add_argument(
+        "session_id",
+        help="the session ID to restore",
+        type=str,
+    )
+    restore_group = restore_parser.add_mutually_exclusive_group(required=True)
+    restore_group.add_argument(
+        "-b", "--backup_id",
+        help="the backup ID to restore",
+        type=str,
+    )
+    restore_group.add_argument(
+        "-s", "--short-hash",
+        help="the short-hash to restore",
+        type=str,
+    )
+    restore_group.add_argument(
+        "-l", "--long-hash",
+        help="the long-hash to restore",
+        type=str,
+    )
+    restore_parser.add_argument(
+        "slot_id",
+        help="the save slot to restore to (default: 0)",
+        type=int,
+        nargs='?',
+        choices=list(range(7)),
+        default=0,
+        const=0
+    )
+    restore_parser.set_defaults(func=RestoreCommands.restore_backup)
+
+    modify_parser = subparsers.add_parser("modify", help="modify an existing backup in-place")
+    modify_parser.add_argument(
+        "session_id",
+        help="the session ID to modify",
+        type=str,
+    )
+    modify_identifier_group = modify_parser.add_mutually_exclusive_group(required=True)
+    modify_identifier_group.add_argument(
+        "-b", "--backup_id",
+        help="the backup ID to modify",
+        type=str,
+    )
+    modify_identifier_group.add_argument(
+        "-s", "--short-hash",
+        help="the short-hash to modify",
+        type=str,
+    )
+    modify_identifier_group.add_argument(
+        "-l", "--long-hash",
+        help="the long-hash to modify",
+        type=str,
+    )
+    modify_parser.add_argument(
+        "--hash",
+        help="recompute the hash for the backup, in case you've modified the contents",
+        action="store_true"
+    )
+    modify_parser.add_argument(
+        "-d", "--description",
+        help="set a new description for the backup, so you can easily identify it later",
+        type=str
+    )
+    modify_parser.set_defaults(func=ModifyCommands.modify_backup)
+
+    return parser
+
+
+if __name__ == "__main__":
+    loaded_tool_config = ToolConfig.load()
+
+    created_parser = init_parser()
+    parsed_args = created_parser.parse_args()
+    try:
+        func = parsed_args.func
+    except AttributeError:
+        func = None
+        created_parser.error("too few arguments")
+
+    func(loaded_tool_config, parsed_args)
