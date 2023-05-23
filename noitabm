@@ -30,71 +30,69 @@ import configparser
 import dataclasses
 import datetime
 import hashlib
+from pathlib import Path, PurePath
 import os
 import re
 import shutil
+import subprocess   # used to try to find Nolla_Games_Noita location
 import typing
 from xml.etree import ElementTree
 
 
-__version_info__ = ('0','9', '0')
+__version_info__ = ('0', '9', '1')
 __version__ = '.'.join(__version_info__)
 
+__config_name__ = "noitabm.ini"
+__config_path__ = Path(__file__).parent.resolve() / __config_name__
 
 @dataclasses.dataclass
 class ToolConfig:
-    game_data_path: str
-    backup_data_path: str
+    f"""
+    Loaded from {__config_name__}, or automatically created if that file doesn't exist.
+    
+    Keeps track of configured paths and can also generate other necessary paths.
+    """
 
-    @staticmethod
-    def _expected_config_path() -> str:
-        source_path = os.path.realpath(__file__).rstrip("\\/")
-        dir_path = os.path.dirname(source_path)
-        return os.path.join(dir_path, "noitabm.ini")
-
-    @staticmethod
-    def _initialize(config_path: str) -> 'ToolConfig':
-        msg = "Enter the path to Noita's save data (i.e. Nolla_Games_Noita):\n"
-        game_data_path = os.path.normpath(input(msg).rstrip("\\/"))
-
-        default_backup_path = os.path.join(game_data_path, "backups")
-        msg = f"\nEnter your desired backup location [{default_backup_path}]:\n"
-        backup_data_path = input(msg)
-        backup_data_path = default_backup_path if backup_data_path == "" else backup_data_path
-        backup_data_path = os.path.normpath(backup_data_path).rstrip("\\/")
-
-        tool_config = ToolConfig(
-            game_data_path=game_data_path,
-            backup_data_path=backup_data_path
-        )
-        config = configparser.ConfigParser()
-        config.read_dict({"PATHS": tool_config.__dict__})
-
-        with open(config_path, 'w') as fobj:
-            config.write(fobj)
-
-        return tool_config
+    noita_data_path: Path
+    backup_data_path: Path
 
     @staticmethod
     def load() -> 'ToolConfig':
-        config_path = ToolConfig._expected_config_path()
-        try:
-            with open(config_path, 'r') as fobj:
-                config = configparser.ConfigParser()
-                config.read_file(fobj)
-                return ToolConfig(**config["PATHS"])
-        except IOError:
-            print(f"{config_path} not found. Creating a new one...\n")
-            return ToolConfig._initialize(config_path)
+        with open(__config_path__, 'r') as fobj:
+            config = configparser.ConfigParser()
+            config.read_file(fobj)
+            path_args = {k: Path(p).resolve() for k, p in config["PATHS"].items()}
+            return ToolConfig(**path_args)
 
-    def slot_path(self, slot_id: int) -> str:
-        return os.path.join(self.game_data_path, f"save{slot_id:02d}")
+    def write(self):
+        parser = configparser.ConfigParser()
+        parser.read_dict({"PATHS": self.__dict__})
 
-    def world_state_path(self, slot_id: int) -> str:
-        return os.path.join(self.slot_path(slot_id), "world_state.xml")
+        with open(__config_path__, 'w') as fobj:
+            parser.write(fobj)
 
-    def extract_session_id(self, slot_id: int) -> str:
-        state_path = self.world_state_path(slot_id)
+    def slot_path(self, slot_id: int) -> Path:
+        return self.noita_data_path / f"save{slot_id:02d}"
+
+    def world_state_path(self, slot_id: int) -> Path:
+        return self.slot_path(slot_id) / "world_state.xml"
+
+    def backup_path(self, session_id: str, backup_id: str) -> Path:
+        return self.backup_data_path / f"{session_id}_{backup_id}"
+
+
+class IdLib:
+    """
+    A collection of functions for generating identifiers.
+    """
+
+    @staticmethod
+    def new_id() -> str:
+        return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    @staticmethod
+    def extract_session_id(tool_config: ToolConfig, slot_id: int) -> str:
+        state_path = tool_config.world_state_path(slot_id)
         tree = ElementTree.parse(state_path)
         session_string = (
             tree.getroot()
@@ -104,38 +102,28 @@ class ToolConfig:
         return re.findall(r"^\?\?STA/sessions/([0-9]{8}-[0-9]{6})$", session_string)[0]
 
     @staticmethod
-    def backup_dirname(session_id: str, backup_id: str) -> str:
-        return f"{session_id}_{backup_id}"
-
-    def backup_path(self, session_id: str, backup_id: str) -> str:
-        return f"{self.backup_data_path}/{ToolConfig.backup_dirname(session_id, backup_id)}"
-
-
-# === UTILITY FUNCTIONS ===
-class IdLib:
-    @staticmethod
-    def id_from_datetime(ts: datetime.datetime) -> str:
-        return ts.strftime("%Y%m%d-%H%M%S")
-
-    @staticmethod
-    def new_id() -> str:
-        return IdLib.id_from_datetime(datetime.datetime.now())
-
-    @staticmethod
-    def hash_directory(base_path: str, ignore: typing.Set[str]) -> str:
+    def hash_directory(base_path: Path, ignore: typing.Set[str] = None) -> str:
         """
         Constructs a git-style SHA1 hash for a directory.
         Hash will change if files are added, renamed or modified.
+        Specific files and paths can be omitted.
+
+        :param base_path: the directory to hash
+        :param ignore: a set of patterns to ignore. Expects basic .gitignore patterns.
+        :return: a git-style SHA1 hash representing the directory's contents
         """
 
-        path_filehash_pairs = {}
+        ignore = {} if ignore is None else ignore
+        path_filehash_pairs: typing.Dict[str, bytes] = {}
 
         # Iterate through directory
         # Add (relative_path, file_hash) pairs to lookup table
-        for subdir, dirs, files in os.walk(base_path):
+        for subdir, dirs, files in os.walk(base_path.resolve()):
             for fname in files:
-                full_path = os.path.join(subdir, fname)
-                relative_path = "/" + full_path.removeprefix(base_path).lstrip("/")
+                full_path = Path(subdir).resolve() / fname
+                relative_path = PurePath("/") / full_path.relative_to(base_path)
+                relative_path = str(relative_path.as_posix())
+
                 with open(full_path, 'rb') as fobj:
                     fhash = hashlib.sha1(fobj.read()).digest()
                     path_filehash_pairs[relative_path] = fhash
@@ -156,10 +144,10 @@ class IdLib:
             if found_in_ignore:
                 continue
 
-            encoded_rpath = os.fsencode(rpath)
-            dir_hash_obj.update(encoded_rpath)
+            dir_hash_obj.update(os.fsencode(rpath))
             dir_hash_obj.update(os.fsencode("\n"))
             dir_hash_obj.update(path_filehash_pairs[rpath])
+            dir_hash_obj.update(os.fsencode("\n"))
 
         return dir_hash_obj.hexdigest()
 
@@ -176,56 +164,167 @@ class BackupInfo:
     description: str
 
     @staticmethod
-    def _get_config_path(backup_root_path: str) -> str:
-        return f"{backup_root_path}/backup_info.txt"
+    def _get_info_path(backup_root_path: Path) -> Path:
+        return backup_root_path / "backup_info.txt"
 
     @staticmethod
-    def path_contains_backup(backup_root_path: str) -> bool:
-        return os.path.exists(BackupInfo._get_config_path(backup_root_path))
+    def path_contains_backup(backup_root_path: Path) -> bool:
+        return BackupInfo._get_info_path(backup_root_path).exists()
 
     @staticmethod
-    def from_root_path(backup_root_path: str) -> 'BackupInfo':
-        config_path = BackupInfo._get_config_path(backup_root_path)
+    def from_root_path(backup_root_path: Path) -> 'BackupInfo':
+        config_path = BackupInfo._get_info_path(backup_root_path)
         config = configparser.ConfigParser()
         config.read(config_path)
-
         return BackupInfo(**config['INFO'])
 
     @staticmethod
-    def construct_contents_hash(save_data_path: str) -> str:
+    def construct_contents_hash(save_data_path: Path) -> str:
         return IdLib.hash_directory(save_data_path, ignore={"/backup_info.txt"})
 
     @property
-    def contents_shorthash(self):
+    def contents_shorthash(self) -> str:
         return IdLib.short_hash(self.contents_hash)
 
-    def backup_path(self, tool_config: ToolConfig) -> str:
+    def backup_path(self, tool_config: ToolConfig) -> Path:
         return tool_config.backup_path(self.session_id, self.backup_id)
 
-    def config_path(self, tool_config: ToolConfig) -> str:
-        return BackupInfo._get_config_path(self.backup_path(tool_config))
+    def info_path(self, tool_config: ToolConfig) -> Path:
+        return BackupInfo._get_info_path(self.backup_path(tool_config))
 
-    def to_config(self) -> configparser.ConfigParser:
-        config = configparser.ConfigParser()
-        config.read_dict({"INFO": self.__dict__})
-        return config
+    def write(self, tool_config: ToolConfig):
+        parser = configparser.ConfigParser()
+        parser.read_dict({"INFO": self.__dict__})
+
+        with open(self.info_path(tool_config), 'w') as fobj:
+            parser.write(fobj)
 
 
-# === LIST SUBCOMMAND ===
+class ConfigCommands:
+    @staticmethod
+    def _guess_noita_path() -> typing.Optional[Path]:
+        import platform
+
+        system = platform.system().lower()
+        release = platform.release().lower()
+        if system == "windows":
+            homedir = Path.home()
+            noita_dir = homedir / "AppData" / "LocalLow" / "Nolla_Games_Noita"
+            return noita_dir if noita_dir.exists() else None
+        elif system == "linux" and release.endswith("microsoft"):
+            try:
+                # cmd = ['cmd.exe', '/c', 'echo %UserProfile%']
+                cmd = ['wslvar', 'USERPROFILE']
+                winpath = subprocess.run(cmd, check=True, shell=False, capture_output=True, text=True).stdout.strip()
+                cmd = ['wslpath', winpath]
+                wslpath = subprocess.run(cmd, check=True, shell=False, capture_output=True, text=True).stdout.strip()
+                noita_dir = Path(wslpath) / "AppData" / "LocalLow" / "Nolla_Games_Noita"
+                return noita_dir if noita_dir.exists() else None
+            except subprocess.CalledProcessError:
+                return None
+
+        elif system == "linux":
+            # GOG: ???
+            # Humble Store: ???
+            # itch.io: ???
+
+            # Handles Steam installations
+            homedir = Path.home()
+            noita_dir = homedir / ".local" / "share" / "Steam" / "steamapps" / "compatdata" / "881100" / "pfx"
+            noita_dir = noita_dir / "drive_c" / "users" / "steamuser" / "AppData" / "LocalLow" / "Nolla_Games_Noita"
+            return noita_dir if noita_dir.exists() else None
+
+        elif system == "darwin":
+            # I have absolutely no clue where Noita's data goes in a Mac install.
+            return None
+
+        else:
+            # When in doubt, return None
+            return None
+
+    @staticmethod
+    def _init_with_prompt(args: argparse.Namespace) -> ToolConfig:
+        noita_data_path = (
+            None if not hasattr(args, "noita_data_path")
+            else None if args.noita_data_path is None
+            else Path(args.noita_data_path)
+        )
+        backup_data_path = (
+            None if not hasattr(args, "backup_data_path")
+            else None if args.backup_data_path is None
+            else Path(args.backup_data_path)
+        )
+
+        if noita_data_path is None:
+            guessed_path = ConfigCommands._guess_noita_path()
+            if guessed_path is not None:
+                msg = f"Enter the path to Noita's save data [{guessed_path}]:\n"
+            else:
+                msg = "Enter the path to Noita's save data (i.e. Nolla_Games_Noita):\n"
+            noita_data_path = input(msg)
+            noita_data_path = guessed_path if noita_data_path == "" else guessed_path
+            noita_data_path = Path(noita_data_path).resolve()
+
+        if backup_data_path is None:
+            default_backup_path = noita_data_path / "backups"
+            msg = f"\nEnter your desired backup storage location [{default_backup_path}]:\n"
+            backup_data_path = input(msg)
+            backup_data_path = default_backup_path if backup_data_path == "" else backup_data_path
+            backup_data_path = Path(backup_data_path).resolve()
+
+        tool_config = ToolConfig(
+            noita_data_path=noita_data_path,
+            backup_data_path=backup_data_path
+        )
+        tool_config.write()
+
+        return tool_config
+
+    @staticmethod
+    def get_or_create_config(args: argparse.Namespace) -> ToolConfig:
+        try:
+            return ToolConfig.load()
+        except IOError:
+            print(f"Config not found at {__config_path__}. Creating a new one...\n")
+            ConfigCommands._init_with_prompt(args)
+            return ToolConfig.load()
+
+    @staticmethod
+    def print_config(tool_config: ToolConfig):
+        print(f"Displaying values from {__config_name__}:")
+        for k, v in sorted(tool_config.__dict__.items()):
+            print(f"    {k}: {v}")
+
+    @staticmethod
+    def run_config_command(tool_config: ToolConfig, args: argparse.Namespace):
+        if args.show:
+            ConfigCommands.print_config(tool_config)
+
+        else:
+            print("Updating config...")
+
+            if args.noita_data_path is not None:
+                tool_config.noita_data_path = Path(args.noita_data_path).resolve()
+
+            if args.backup_data_path is not None:
+                tool_config.backup_data_path = Path(args.backup_data_path).resolve()
+
+            tool_config.write()
+
+            print("Update complete")
+
+
 class ListCommands:
     @staticmethod
     def retrieve_all_backup_info(tool_config: ToolConfig) -> typing.List[BackupInfo]:
-        print(tool_config.backup_data_path)
-
         try:
             paths = [
-                os.path.join(tool_config.backup_data_path, p)
-                for p in os.listdir(tool_config.backup_data_path)
+                tool_config.backup_data_path / p
+                for p in tool_config.backup_data_path.iterdir()
             ]
             return [
                 BackupInfo.from_root_path(p) for p in paths
-                if os.path.isdir(p)
-                and BackupInfo.path_contains_backup(p)
+                if p.is_dir() and BackupInfo.path_contains_backup(p)
             ]
 
         except FileNotFoundError:
@@ -357,16 +456,8 @@ class ListCommands:
                     print(s)
 
     @staticmethod
-    def print_config(tool_config: ToolConfig):
-        print("Displaying values from noitabm.ini:")
-        for k, v in sorted(tool_config.__dict__.items()):
-            print(f"    {k}: {v}")
-
-    @staticmethod
     def run_list_command(tool_config, args: argparse.Namespace):
-        if args.config:
-            ListCommands.print_config(tool_config)
-        elif args.all:
+        if args.all:
             ListCommands.print_all_backup_info(tool_config)
         elif args.session_id is None:
             session_info = ListCommands.retrieve_session_ids(tool_config)
@@ -376,13 +467,12 @@ class ListCommands:
             ListCommands.print_session_backup_info(args.session_id, selected_backup_info)
 
 
-# === BACKUP SUBCOMMAND ===
 class BackupCommands:
     @staticmethod
     def create_new_backup(tool_config: ToolConfig, slot_id: int, description: str):
         slot_path = tool_config.slot_path(slot_id)
 
-        session_id = tool_config.extract_session_id(slot_id)
+        session_id = IdLib.extract_session_id(tool_config, slot_id)
         backup_id = IdLib.new_id()
         contents_hash = BackupInfo.construct_contents_hash(slot_path)
 
@@ -393,12 +483,13 @@ class BackupCommands:
             description=description
         )
         backup_path = backup_info.backup_path(tool_config)
-        config_path = backup_info.config_path(tool_config)
 
         print(f"Creating new backup...")
 
-        existing_hashes = {b.contents_hash: b for b in
-                           ListCommands.retrieve_session_backup_info(tool_config, session_id)}
+        existing_hashes = {
+            b.contents_hash: b
+            for b in ListCommands.retrieve_session_backup_info(tool_config, session_id)
+        }
         if contents_hash in existing_hashes:
             b = existing_hashes[contents_hash]
             print(f"Slot {slot_id} has already been backed up.")
@@ -417,20 +508,17 @@ class BackupCommands:
         print(f"    Description: {backup_info.description}")
         print(f"    Src: {slot_path}")
         print(f"    Dst: {backup_path}")
-        print(f"    Info: {config_path}")
+        print(f"    Info: {backup_info.info_path(tool_config)}")
         shutil.copytree(slot_path, backup_path)
-        with open(config_path, 'w') as fobj:
-            backup_config = backup_info.to_config()
-            backup_config.write(fobj)
-        print()
-        print("    Backup complete")
+        backup_info.write(tool_config)
+
+        print("\n    Backup complete")
 
     @staticmethod
     def run_backup_command(tool_config: ToolConfig, args: argparse.Namespace):
         BackupCommands.create_new_backup(tool_config, args.slot_id, args.description)
 
 
-# === RESTORE SUBCOMMAND ===
 class RestoreCommands:
     @staticmethod
     def restore_backup(tool_config: ToolConfig, args: argparse.Namespace):
@@ -456,8 +544,9 @@ class RestoreCommands:
             print(f"No backup found for session ID {args.session_id} and {word} {key}")
             return
 
-        description = f"Automatic backup of Slot {args.slot_id}"
-        BackupCommands.create_new_backup(tool_config, args.slot_id, description)
+        if not args.skip_restore_point:
+            description = f"Automatic backup of Slot {args.slot_id}"
+            BackupCommands.create_new_backup(tool_config, args.slot_id, description)
 
         source_backup = existing_backups[key]
         source_path = source_backup.backup_path(tool_config)
@@ -489,19 +578,16 @@ class ModifyCommands:
         print(f"    Long Hash: {backup_info.contents_hash}")
         print(f"    Description: {backup_info.description}")
 
-        if args.hash:
+        if args.hash is not None:
             print("Recalculating hash...")
             new_hash = BackupInfo.construct_contents_hash(backup_info.backup_path(tool_config))
             backup_info.contents_hash = new_hash
 
-        if args.description:
+        if args.description is not None:
             print("Updating description...")
             backup_info.description = args.description
 
-        config_path = backup_info.config_path(tool_config)
-        with open(config_path, 'w') as fobj:
-            backup_config = backup_info.to_config()
-            backup_config.write(fobj)
+        backup_info.write(tool_config)
 
         reloaded_backup_info = BackupInfo.from_root_path(backup_info.backup_path(tool_config))
         print("\nSuccessfully updated backup:")
@@ -523,13 +609,30 @@ def init_parser():
         version=f'%(prog)s {__version__}'
     )
 
-    list_parser = subparsers.add_parser("list", help="list available session IDs or backup IDs")
-    list_group = list_parser.add_mutually_exclusive_group()
-    list_group.add_argument(
-        "-c", "--config",
-        help="list the values in noitabm.ini",
+    # === CONFIG COMMANDS ===
+    config_parser = subparsers.add_parser("config", help=f"set {__config_name__} values from the command line")
+    config_group = config_parser.add_mutually_exclusive_group(required=True)
+    config_group.add_argument(
+        "--show",
+        help=f"show the contents of {__config_name__}",
         action="store_true"
     )
+    config_settings_group = config_group.add_argument_group()
+    config_settings_group.add_argument(
+        "--noita-data-path",
+        help="set the path to Noita's save data (i.e. Nolla_Games_Noita)",
+        type=str
+    )
+    config_settings_group.add_argument(
+        "--backup-data-path",
+        help="set your desired backup storage location",
+        type=str
+    )
+    config_parser.set_defaults(func=ConfigCommands.run_config_command)
+
+    # === LIST COMMANDS ===
+    list_parser = subparsers.add_parser("list", help="list available session IDs or backup IDs")
+    list_group = list_parser.add_mutually_exclusive_group()
     list_group.add_argument(
         "-a", "--all",
         help="list all backups for all sessions",
@@ -543,6 +646,7 @@ def init_parser():
     )
     list_parser.set_defaults(func=ListCommands.run_list_command)
 
+    # === BACKUP COMMANDS ===
     backup_parser = subparsers.add_parser("backup", help="create a new backup from the specified slot")
     backup_parser.add_argument(
         "slot_id",
@@ -559,8 +663,9 @@ def init_parser():
         type=str,
         default=""
     )
-    backup_parser.set_defaults(func=BackupCommands.run_backup_command)
+    backup_parser.set_defaults(func=BackupCommands.create_new_backup)
 
+    # === RESTORE COMMANDS ===
     restore_parser = subparsers.add_parser("restore", help="restore the specified backup to the specified slot")
     restore_parser.add_argument(
         "session_id",
@@ -592,8 +697,14 @@ def init_parser():
         default=0,
         const=0
     )
+    restore_parser.add_argument(
+        "--skip-restore-point",
+        help="apply the backup without creating a restore point. CURRENT DATA WILL BE PERMANENTLY LOST.",
+        action="store_true"
+    )
     restore_parser.set_defaults(func=RestoreCommands.restore_backup)
 
+    # === MODIFY COMMANDS ===
     modify_parser = subparsers.add_parser("modify", help="modify an existing backup in-place")
     modify_parser.add_argument(
         "session_id",
@@ -626,20 +737,24 @@ def init_parser():
         help="set a new description for the backup, so you can easily identify it later",
         type=str
     )
+    # TODO: Add --delete command for session and backup
+    # TODO: Add --hash-all command to rehash all backups
     modify_parser.set_defaults(func=ModifyCommands.modify_backup)
 
     return parser
 
 
 if __name__ == "__main__":
-    loaded_tool_config = ToolConfig.load()
-
     created_parser = init_parser()
     parsed_args = created_parser.parse_args()
-    try:
-        func = parsed_args.func
-    except AttributeError:
-        func = None
-        created_parser.error("too few arguments")
+
+    loaded_tool_config = ConfigCommands.get_or_create_config(parsed_args)
+
+    # I forgot why I added this try/catch block, and now I can't reproduce the error that motivated it.
+    # try:
+    func = parsed_args.func
+    # except AttributeError:
+    #     func = None
+    #     created_parser.error("too few arguments")
 
     func(loaded_tool_config, parsed_args)
