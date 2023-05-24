@@ -211,9 +211,8 @@ class ConfigCommands:
             homedir = Path.home()
             noita_dir = homedir / "AppData" / "LocalLow" / "Nolla_Games_Noita"
             return noita_dir if noita_dir.exists() else None
-        elif system == "linux" and release.endswith("microsoft"):
+        elif system == "linux":
             try:
-                # cmd = ['cmd.exe', '/c', 'echo %UserProfile%']
                 cmd = ['wslvar', 'USERPROFILE']
                 winpath = subprocess.run(cmd, check=True, shell=False, capture_output=True, text=True).stdout.strip()
                 cmd = ['wslpath', winpath]
@@ -221,18 +220,16 @@ class ConfigCommands:
                 noita_dir = Path(wslpath) / "AppData" / "LocalLow" / "Nolla_Games_Noita"
                 return noita_dir if noita_dir.exists() else None
             except subprocess.CalledProcessError:
-                return None
+                # GOG: ???
+                # Humble Store: ???
+                # itch.io: ???
 
-        elif system == "linux":
-            # GOG: ???
-            # Humble Store: ???
-            # itch.io: ???
-
-            # Handles Steam installations
-            homedir = Path.home()
-            noita_dir = homedir / ".local" / "share" / "Steam" / "steamapps" / "compatdata" / "881100" / "pfx"
-            noita_dir = noita_dir / "drive_c" / "users" / "steamuser" / "AppData" / "LocalLow" / "Nolla_Games_Noita"
-            return noita_dir if noita_dir.exists() else None
+                # Handles Steam installations
+                homedir = Path.home()
+                noita_dir = homedir / ".local" / "share" / "Steam" / "steamapps" / "compatdata"
+                noita_dir = noita_dir / "881100" / "pfx" / "drive_c" / "users" / "steamuser"
+                noita_dir = noita_dir / "AppData" / "LocalLow" / "Nolla_Games_Noita"
+                return noita_dir if noita_dir.exists() else None
 
         elif system == "darwin":
             # I have absolutely no clue where Noita's data goes in a Mac install.
@@ -296,21 +293,17 @@ class ConfigCommands:
             print(f"    {k}: {v}")
 
     @staticmethod
-    def run_config_command(tool_config: ToolConfig, args: argparse.Namespace):
-        if args.print:
-            ConfigCommands.print_config(tool_config)
+    def edit_config(tool_config: ToolConfig, args: argparse.Namespace):
+        if args.noita_data_path is not None:
+            tool_config.noita_data_path = Path(args.noita_data_path).resolve()
 
-        else:
-            if args.noita_data_path is not None:
-                tool_config.noita_data_path = Path(args.noita_data_path).resolve()
+        if args.backup_data_path is not None:
+            tool_config.backup_data_path = Path(args.backup_data_path).resolve()
 
-            if args.backup_data_path is not None:
-                tool_config.backup_data_path = Path(args.backup_data_path).resolve()
+        tool_config.write()
 
-            tool_config.write()
-
-            print("Config updated")
-            ConfigCommands.print_config(tool_config)
+        print("Config updated")
+        ConfigCommands.print_config(tool_config)
 
 
 class ListCommands:
@@ -632,23 +625,30 @@ def init_parser():
 
     # === CONFIG COMMANDS ===
     config_parser = subparsers.add_parser("config", help=f"set {__config_name__} values from the command line")
-    config_parser.add_argument(
-        "-p", "--print",
+    config_subparsers = config_parser.add_subparsers()
+    # = PRINT =
+    config_print_parser = config_subparsers.add_parser(
+        "print",
         help=f"print the contents and location of {__config_name__}",
-        action="store_true"
     )
-    config_settings_group = config_parser.add_argument_group("modifiables")
-    config_settings_group.add_argument(
+    config_print_parser.set_defaults(func=lambda t, a: ConfigCommands.print_config(t))
+    # = EDIT =
+    config_edit_parser = config_subparsers.add_parser(
+        "edit",
+        help="edit config values"
+    )
+    config_edit_group = config_edit_parser.add_argument_group("modifiables")
+    config_edit_group.add_argument(
         "--noita-data-path",
         help="set the path to Noita's save data (i.e. Nolla_Games_Noita)",
         type=str
     )
-    config_settings_group.add_argument(
+    config_edit_group.add_argument(
         "--backup-data-path",
         help="set your desired backup storage location",
         type=str
     )
-    config_parser.set_defaults(func=ConfigCommands.run_config_command)
+    config_parser.set_defaults(func=ConfigCommands.edit_config)
 
     # === LIST COMMANDS ===
     list_parser = subparsers.add_parser("list", help="list available session IDs or backup IDs")
