@@ -672,7 +672,7 @@ def init_parser():
     config_parser.set_defaults(func=ConfigCommands.edit_config)
 
     # === LIST COMMANDS ===
-    list_parser = subparsers.add_parser("list", help="list available session IDs or backup IDs")
+    list_parser = subparsers.add_parser("list", help="list available session IDs, backup IDs, and hashes")
     # = list =
     list_parser.add_argument(
         "-b",
@@ -854,6 +854,7 @@ if __name__ == "__main__":
     # TODO: Add safety checks for collided short hashes
     # TODO: Add safety-confirmation for Nolla_Games_Noita path
     # TODO: Add option to rebuild entire backup_info.txt
+    # TODO: Add option to display long hashes in list command
 
     created_parser = init_parser()
     parsed_args = created_parser.parse_args()
