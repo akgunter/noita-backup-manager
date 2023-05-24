@@ -206,15 +206,15 @@ class BackupInfo:
 class ConfigCommands:
     @staticmethod
     def _guess_noita_path() -> typing.Optional[Path]:
-
         system = platform.system().lower()
-        release = platform.release().lower()
+
         if system == "windows":
             homedir = Path.home()
             noita_dir = homedir / "AppData" / "LocalLow" / "Nolla_Games_Noita"
             return noita_dir if noita_dir.exists() else None
         elif system == "linux":
             try:
+                # WSL logic
                 cmd = ['wslvar', 'USERPROFILE']
                 winpath = subprocess.run(cmd, check=True, shell=False, capture_output=True, text=True).stdout.strip()
                 cmd = ['wslpath', winpath]
@@ -222,6 +222,8 @@ class ConfigCommands:
                 noita_dir = Path(wslpath) / "AppData" / "LocalLow" / "Nolla_Games_Noita"
                 return noita_dir if noita_dir.exists() else None
             except subprocess.CalledProcessError:
+                # true Linux logic
+
                 # GOG: ???
                 # Humble Store: ???
                 # itch.io: ???
@@ -712,7 +714,7 @@ def init_parser():
         type=str,
         default=""
     )
-    backup_parser.set_defaults(func=BackupCommands.create_new_backup)
+    backup_parser.set_defaults(func=BackupCommands.run_backup_command)
 
     # === RESTORE COMMANDS ===
     restore_parser = subparsers.add_parser("restore", help="restore the specified backup to the specified slot")

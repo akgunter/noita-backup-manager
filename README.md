@@ -35,9 +35,11 @@ in a shell.
   * Can list N most recent sessions or N most recent backups
   * Can list all backups for a given session
 * **backup:** create a new backup from the specified slot
+  * *I strongly recommend Saving and Quitting Noita before creating backups. Weird things may happen otherwise.*
   * Defaults to backing up `save00`
   * Can back up any of the seven built-in slots
 * **restore:** restore the specified backup to the specified slot
+  * *Again, Save and Quit before restoring a backup.*
   * Can select a backup by (session_id, backup_id)
   * Can select a backup by (session_id, short_hash)
   * Can select a backup by (session_id, long_hash)
