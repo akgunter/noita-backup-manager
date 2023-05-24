@@ -335,7 +335,9 @@ class ListCommands:
         ]
 
     @staticmethod
-    def print_session_id_list(session_info: typing.List[str]):
+    def print_session_id_list(tool_config: ToolConfig):
+        session_info = ListCommands.retrieve_session_ids(tool_config)
+
         if len(session_info) == 0:
             print("No backups found...")
             return
@@ -347,13 +349,16 @@ class ListCommands:
             print(f"    {s}")
 
     @staticmethod
-    def print_session_backup_info(session_id: int, backup_info: typing.List[BackupInfo]):
-        if len(backup_info) == 0:
+    def print_session_backup_info(tool_config: ToolConfig, args: argparse.Namespace):
+        session_id = args.session_id
+        selected_backup_info = ListCommands.retrieve_session_backup_info(tool_config, session_id)
+
+        if len(selected_backup_info) == 0:
             print(f"No backups found for session {session_id}...")
             return
 
         backup_id_header = "BACKUP ID"
-        backup_id_maxlen = max(len(backup_id_header), max(len(b.backup_id) for b in backup_info))
+        backup_id_maxlen = max(len(backup_id_header), max(len(b.backup_id) for b in selected_backup_info))
         shorthash_header = "SHORT HASH"
         shorthash_maxlen = max(len(shorthash_header), 7)
         # longhash_header = "LONG HASH"
@@ -373,10 +378,10 @@ class ListCommands:
             b.contents_shorthash + " " * (shorthash_maxlen - len(b.contents_shorthash)) + "    " +
             # b.contents_hash + " " * (longhash_maxlen - len(b.contents_hash)) + "    " +
             b.description
-            for b in backup_info
+            for b in selected_backup_info
         ]
 
-        print(f"Found {len(backup_info)} backups for session {session_id}:\n")
+        print(f"Found {len(selected_backup_info)} backups for session {session_id}:\n")
         print(header_str)
         print("    " + "-" * (backup_id_maxlen + shorthash_maxlen + len(desc_header) + 8))
         for b_str in sorted(backup_info_strings):
@@ -446,17 +451,6 @@ class ListCommands:
                 ]
                 for s in remaining_info_strings:
                     print(s)
-
-    @staticmethod
-    def run_list_command(tool_config, args: argparse.Namespace):
-        if args.all:
-            ListCommands.print_all_backup_info(tool_config)
-        elif args.session_id is None:
-            session_info = ListCommands.retrieve_session_ids(tool_config)
-            ListCommands.print_session_id_list(session_info)
-        else:
-            selected_backup_info = ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
-            ListCommands.print_session_backup_info(args.session_id, selected_backup_info)
 
 
 class BackupCommands:
@@ -626,13 +620,13 @@ def init_parser():
     # === CONFIG COMMANDS ===
     config_parser = subparsers.add_parser("config", help=f"set {__config_name__} values from the command line")
     config_subparsers = config_parser.add_subparsers()
-    # = PRINT =
+    # = print =
     config_print_parser = config_subparsers.add_parser(
         "print",
         help=f"print the contents and location of {__config_name__}",
     )
     config_print_parser.set_defaults(func=lambda t, a: ConfigCommands.print_config(t))
-    # = EDIT =
+    # = edit =
     config_edit_parser = config_subparsers.add_parser(
         "edit",
         help="edit config values"
@@ -651,20 +645,24 @@ def init_parser():
     config_parser.set_defaults(func=ConfigCommands.edit_config)
 
     # === LIST COMMANDS ===
+    # TODO: Consider swapping to one config with "-n" option for number of past sessions to show
     list_parser = subparsers.add_parser("list", help="list available session IDs or backup IDs")
-    list_group = list_parser.add_mutually_exclusive_group()
-    list_group.add_argument(
-        "-a", "--all",
-        help="list all backups for all sessions",
-        action="store_true"
-    )
-    list_group.add_argument(
+    list_subcommands = list_parser.add_subparsers()
+    # = all =
+    list_all_parser = list_subcommands.add_parser("all")
+    list_all_parser.set_defaults(func=lambda t, a: ListCommands.print_all_backup_info(t))
+    # = sessions =
+    list_sessions_parser = list_subcommands.add_parser("sessions")
+    list_sessions_parser.set_defaults(func=lambda t, a: ListCommands.print_session_id_list(t))
+    # = backups =
+    list_backups_parser = list_subcommands.add_parser("backups")
+    list_backups_parser.add_argument(
         "session_id",
         help="list backup IDs for the specified session ID",
         type=str,
         nargs='?'
     )
-    list_parser.set_defaults(func=ListCommands.run_list_command)
+    list_backups_parser.set_defaults(func=ListCommands.print_session_backup_info)
 
     # === BACKUP COMMANDS ===
     backup_parser = subparsers.add_parser("backup", help="create a new backup from the specified slot")
