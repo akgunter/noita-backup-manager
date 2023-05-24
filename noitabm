@@ -34,7 +34,7 @@ from pathlib import Path, PurePath
 import os
 import re
 import shutil
-import subprocess   # used to try to find Nolla_Games_Noita location
+import subprocess   # used to try to automatically find Nolla_Games_Noita location
 import typing
 from xml.etree import ElementTree
 
@@ -291,18 +291,16 @@ class ConfigCommands:
 
     @staticmethod
     def print_config(tool_config: ToolConfig):
-        print(f"Displaying values from {__config_name__}:")
+        print(f"Displaying values from {__config_path__}:")
         for k, v in sorted(tool_config.__dict__.items()):
             print(f"    {k}: {v}")
 
     @staticmethod
     def run_config_command(tool_config: ToolConfig, args: argparse.Namespace):
-        if args.show:
+        if args.print:
             ConfigCommands.print_config(tool_config)
 
         else:
-            print("Updating config...")
-
             if args.noita_data_path is not None:
                 tool_config.noita_data_path = Path(args.noita_data_path).resolve()
 
@@ -311,7 +309,8 @@ class ConfigCommands:
 
             tool_config.write()
 
-            print("Update complete")
+            print("Config updated")
+            ConfigCommands.print_config(tool_config)
 
 
 class ListCommands:
@@ -561,7 +560,20 @@ class RestoreCommands:
 
 class ModifyCommands:
     @staticmethod
+    def recalc_hash(tool_config: ToolConfig, backup_info: BackupInfo):
+        new_hash = BackupInfo.construct_contents_hash(backup_info.backup_path(tool_config))
+        backup_info.contents_hash = new_hash
+
+    @staticmethod
     def modify_backup(tool_config: ToolConfig, args: argparse.Namespace):
+        if args.hash_all:
+            print("Recomputing all hashes. This may take a while...")
+            all_backups = ListCommands.retrieve_all_backup_info(tool_config)
+            for backup_info in all_backups:
+                ModifyCommands.recalc_hash(tool_config, backup_info)
+            print("Complete")
+            return
+
         selected_backups = ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
 
         if args.backup_id is not None:
@@ -578,10 +590,9 @@ class ModifyCommands:
         print(f"    Long Hash: {backup_info.contents_hash}")
         print(f"    Description: {backup_info.description}")
 
-        if args.hash is not None:
+        if args.hash:
             print("Recalculating hash...")
-            new_hash = BackupInfo.construct_contents_hash(backup_info.backup_path(tool_config))
-            backup_info.contents_hash = new_hash
+            ModifyCommands.recalc_hash(tool_config, backup_info)
 
         if args.description is not None:
             print("Updating description...")
@@ -598,6 +609,16 @@ class ModifyCommands:
         print(f"    Description: {reloaded_backup_info.description}")
 
 
+class DeleteCommands:
+    @staticmethod
+    def run_session_delete(tool_config: ToolConfig, args: argparse.Namespace):
+        print(args)
+
+    @staticmethod
+    def run_backup_delete(tool_config: ToolConfig, args: argparse.Namespace):
+        print(args)
+
+
 # === PARSER SETUP ===
 def init_parser():
     parser = argparse.ArgumentParser()
@@ -611,13 +632,12 @@ def init_parser():
 
     # === CONFIG COMMANDS ===
     config_parser = subparsers.add_parser("config", help=f"set {__config_name__} values from the command line")
-    config_group = config_parser.add_mutually_exclusive_group(required=True)
-    config_group.add_argument(
-        "--show",
-        help=f"show the contents of {__config_name__}",
+    config_parser.add_argument(
+        "-p", "--print",
+        help=f"print the contents and location of {__config_name__}",
         action="store_true"
     )
-    config_settings_group = config_group.add_argument_group()
+    config_settings_group = config_parser.add_argument_group("modifiables")
     config_settings_group.add_argument(
         "--noita-data-path",
         help="set the path to Noita's save data (i.e. Nolla_Games_Noita)",
@@ -707,11 +727,19 @@ def init_parser():
     # === MODIFY COMMANDS ===
     modify_parser = subparsers.add_parser("modify", help="modify an existing backup in-place")
     modify_parser.add_argument(
+        "--hash-all",
+        help="recompute all hashes",
+        action="store_true"
+    )
+
+    modify_subparsers = modify_parser.add_subparsers()
+    modify_session_parser = modify_subparsers.add_parser("session")
+    modify_session_parser.add_argument(
         "session_id",
         help="the session ID to modify",
         type=str,
     )
-    modify_identifier_group = modify_parser.add_mutually_exclusive_group(required=True)
+    modify_identifier_group = modify_session_parser.add_mutually_exclusive_group(required=True)
     modify_identifier_group.add_argument(
         "-b", "--backup_id",
         help="the backup ID to modify",
@@ -727,19 +755,62 @@ def init_parser():
         help="the long-hash to modify",
         type=str,
     )
-    modify_parser.add_argument(
+    modify_session_parser.add_argument(
         "--hash",
         help="recompute the hash for the backup, in case you've modified the contents",
         action="store_true"
     )
-    modify_parser.add_argument(
+    modify_session_parser.add_argument(
         "-d", "--description",
         help="set a new description for the backup, so you can easily identify it later",
         type=str
     )
-    # TODO: Add --delete command for session and backup
-    # TODO: Add --hash-all command to rehash all backups
     modify_parser.set_defaults(func=ModifyCommands.modify_backup)
+
+    # === DELETE COMMANDS ===
+    delete_parser = subparsers.add_parser("delete", help="delete archived sessions and backups")
+    delete_session_subparsers = delete_parser.add_subparsers()
+    delete_session_parser = delete_session_subparsers.add_parser(
+        "session",
+        help="delete all backups for the given session"
+    )
+    delete_session_parser.add_argument(
+        "session_id",
+        help="the session ID to delete",
+        type=str,
+    )
+    delete_session_parser.set_defaults(func=DeleteCommands.run_session_delete)
+
+    delete_backup_subparser = delete_session_subparsers.add_parser(
+        "backup",
+        help="delete a specified backup for a specified session"
+    )
+    delete_backup_group = delete_backup_subparser.add_argument_group()
+    delete_backup_group.add_argument(
+        "session_id",
+        help="the session ID to modify",
+        type=str,
+    )
+    delete_backup_subgroup = delete_backup_group.add_mutually_exclusive_group(required=True)
+    delete_backup_subgroup.add_argument(
+        "-b", "--backup_id",
+        help="the backup ID to modify",
+        type=str,
+    )
+    delete_backup_subgroup.add_argument(
+        "-s", "--short-hash",
+        help="the short-hash to modify",
+        type=str,
+    )
+    delete_backup_subgroup.add_argument(
+        "-l", "--long-hash",
+        help="the long-hash to modify",
+        type=str,
+    )
+    delete_backup_subparser.set_defaults(func=DeleteCommands.run_backup_delete)
+
+    # TODO: Implement delete operations
+    # TODO: Refactor other commands to use more commands and fewer arguments
 
     return parser
 
