@@ -96,13 +96,17 @@ class IdLib:
     @staticmethod
     def extract_session_id(tool_config: ToolConfig, slot_id: int) -> str:
         state_path = tool_config.world_state_path(slot_id)
-        tree = ElementTree.parse(state_path)
-        session_string = (
-            tree.getroot()
-                .find('WorldStateComponent')
-                .attrib['session_stat_file']
-        )
-        return re.findall(r"^\?\?STA/sessions/([0-9]{8}-[0-9]{6})$", session_string)[0]
+        try:
+            tree = ElementTree.parse(state_path)
+            session_string = (
+                tree.getroot()
+                    .find('WorldStateComponent')
+                    .attrib['session_stat_file']
+            )
+            return re.findall(r"^\?\?STA/sessions/([0-9]{8}-[0-9]{6})$", session_string)[0]
+        except FileNotFoundError as err:
+            print(f"Session ID lookup failed: {state_path.relative_to(tool_config.noita_data_path)} doesn't exist")
+            raise err
 
     @staticmethod
     def hash_directory(base_path: Path, ignore: typing.Set[str] = None) -> str:
@@ -441,7 +445,12 @@ class BackupCommands:
     def create_new_backup(tool_config: ToolConfig, slot_id: int, description: str):
         slot_path = tool_config.slot_path(slot_id)
 
-        session_id = IdLib.extract_session_id(tool_config, slot_id)
+        try:
+            session_id = IdLib.extract_session_id(tool_config, slot_id)
+        except FileNotFoundError as err:
+            print("Backup failed: try using Save and Quit in-game to initialize world data")
+            raise err
+
         backup_id = IdLib.new_id()
         contents_hash = BackupInfo.construct_contents_hash(slot_path)
 
@@ -485,7 +494,10 @@ class BackupCommands:
 
     @staticmethod
     def run_backup_command(tool_config: ToolConfig, args: argparse.Namespace):
-        BackupCommands.create_new_backup(tool_config, args.slot_id, args.description)
+        try:
+            BackupCommands.create_new_backup(tool_config, args.slot_id, args.description)
+        except FileNotFoundError:
+            return
 
 
 class RestoreCommands:
@@ -514,8 +526,12 @@ class RestoreCommands:
             return
 
         if not args.skip_restore_point:
-            description = f"Automatic backup of Slot {args.slot_id}"
-            BackupCommands.create_new_backup(tool_config, args.slot_id, description)
+            try:
+                description = f"Automatic backup of Slot {args.slot_id}"
+                BackupCommands.create_new_backup(tool_config, args.slot_id, description)
+            except FileNotFoundError:
+                print("Restoration failed: unable to create restore point")
+                return
 
         source_backup = existing_backups[key]
         source_path = source_backup.backup_path(tool_config)
@@ -845,8 +861,6 @@ def init_parser():
         type=str,
     )
     delete_backup_subparser.set_defaults(func=DeleteCommands.run_backup_delete)
-
-    # TODO: Implement delete operations
 
     return parser
 
