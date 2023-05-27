@@ -1,29 +1,39 @@
 # noita-backup-manager
 A command line utility written in Python for managing backups of Noita save archives.
 
-## Setup
-The first time you run the tool, it'll run through a short setup process. 
-1. Enter the path to `Nolla_Games_Noita`. The tool will attempt to find it automatically and use that as the default.
-2. Enter the directory for storing your backups. The default will be `Nolla_Games_Noita/Backups/`.
-
-The tool will save these two values to `noitabm.ini`, right next to `noitabm`.
-
 ## Supported Environments
 * Requires Python 3.7+.
-* Windows, WSL on Windows, Linux, and Mac should all work.
-    * The tool should find `Nolla_Games_Noita` automatically in Windows and WSL.
-    * It might not find `Nolla_Games_Noita` automatically in Linux.
-    * It definitely won't find `Nolla_Games_Noita` automatically in Mac.
 * No additional Python libraries required.
+* Should work on Windows, WSL on Windows, Linux, and Mac.
+    * It should find `Nolla_Games_Noita` automatically in Windows and WSL. If it works correctly, you won't have to
+      type any paths if you don't want to.
+    * In theory, it should find `Nolla_Games_Noita` automatically in Linux if you installed Noita from Steam.
+      I haven't figured out how other storefronts install the game yet, so you'll have to type out the path
+      yourself in those cases.
+    * It will not find `Nolla_Games_Noita` automatically in Mac. I don't have a clue what an "ordinary" Noita
+      installation looks like in Mac, so you'll have to type out the path yourself.
 
-## Usage
+## Installation and Usage
 ### WSL, Linux, and Mac
 Make sure `python3` points to Python 3.7+. Then make sure `noitabm` is executable and
-in your PATH variable. Then you can run the tool by calling `noitabm` or `python3 noitabm` in a shell.
+in your PATH. Then you can run the tool by calling `noitabm` or `python3 noitabm` in a shell.
+
+If that doesn't work for some reason, it's a Python script; so you can always call `python3 noitabm`.
 
 ### Windows
-Make sure Python 3.7+ is in your PATH variable. Then you can run the tool by calling `python noitabm`
-in a shell.
+Make sure Python 3.7+ is in your PATH. Then you can run the tool by calling `python noitabm` in a shell.
+
+As far as I can tell, Windows doesn't have an equivalent to the shebang notation; so there isn't a
+simple way for me to drop the "python" invocation. I'll probably have to compile the script to
+an exe.
+
+### Initial Run
+The first time you run the tool, it'll run through a short setup process. 
+1. Enter the path to `Nolla_Games_Noita`. The tool will attempt to find it automatically and use that as the default.
+2. Enter the directory for storing your backups. The default will be `.../Nolla_Games_Noita/backups/`, but you can
+   put it anywhere you want.
+
+The tool will save these two values to `noitabm.ini`, right next to `noitabm`.
 
 ### Commands
 * **config:** set noitabm.ini values from the command line
@@ -34,6 +44,7 @@ in a shell.
   * Defaults to listing all sessions and backups
   * Can list N most recent sessions or N most recent backups
   * Can list all backups for a given session
+  * Can print 40-digit SHA1 hashes instead of 7-digit prefixes
 * **backup:** create a new backup from the specified slot
   * *I strongly recommend Saving and Quitting Noita before creating backups. Weird things may happen otherwise.*
   * Defaults to backing up `save00`

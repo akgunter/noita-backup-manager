@@ -41,7 +41,7 @@ import typing
 from xml.etree import ElementTree
 
 
-__version_info__ = ('0', '9', '2')
+__version_info__ = ('0', '9', '3')
 __version__ = '.'.join(__version_info__)
 
 __config_name__ = "noitabm.ini"
@@ -223,6 +223,7 @@ class ConfigCommands:
                 winpath = subprocess.run(cmd, check=True, shell=False, capture_output=True, text=True).stdout.strip()
                 cmd = ['wslpath', winpath]
                 wslpath = subprocess.run(cmd, check=True, shell=False, capture_output=True, text=True).stdout.strip()
+                # noinspection PyTypeChecker
                 noita_dir = Path(wslpath) / "AppData" / "LocalLow" / "Nolla_Games_Noita"
                 return noita_dir if noita_dir.exists() else None
             except subprocess.CalledProcessError:
@@ -315,6 +316,27 @@ class ConfigCommands:
 
 
 class ListCommands:
+    # noinspection PyStatementEffect
+    @staticmethod
+    def identify_duplicate_keys(
+        tool_config: ToolConfig,
+        selected_backup_info: typing.List[BackupInfo],
+        grouping_key: str
+    ) -> typing.Dict[str, int]:
+
+        # assert grouping_key in {"backup_id", "short_hash", "long_hash"}, \
+        #     f"grouping_key {grouping_key} is not one of {{"backup_id", "short_hash", "long_hash"}}"
+
+        if grouping_key == "backup_id":
+            by_bid = {k: list(v) for k, v in groupby(selected_backup_info, lambda b: b.backup_id)}
+            return {bid: len(list(infos)) for bid, infos in by_bid if len(infos) > 1}
+        elif grouping_key == "short_hash":
+            by_short_hash = {k: list(v) for k, v in groupby(selected_backup_info, lambda b: b.contents_shorthash)}
+            return {sh: len(infos) for sh, infos in by_short_hash if len(infos) > 1}
+        else:
+            by_long_hash = {k: list(v) for k, v in groupby(selected_backup_info,lambda b: b.contents_hash)}
+            return {lh: len(infos) for lh, infos in by_long_hash if len(infos) > 1}
+
     @staticmethod
     def retrieve_all_backup_info(tool_config: ToolConfig) -> typing.List[BackupInfo]:
         try:
@@ -343,7 +365,11 @@ class ListCommands:
         ]
 
     @staticmethod
-    def print_selected_backup_info(selected_backup_info: typing.List[BackupInfo]):
+    def print_selected_backup_info(
+        selected_backup_info: typing.List[BackupInfo],
+        with_long_hashes: bool = False
+    ):
+
         if len(selected_backup_info) == 0:
             print("No backups found...")
             return
@@ -365,17 +391,19 @@ class ListCommands:
         )
         shorthash_header = "SHORT HASH"
         shorthash_maxlen = max(len(shorthash_header), 7)
-        # longhash_header = "LONG HASH"
-        # longhash_maxlen = max(len(longhash_header), 40)
+        longhash_header = "LONG HASH"
+        longhash_maxlen = max(len(longhash_header), 40)
         desc_header = "DESCRIPTION"
         header_str = (
                 "    " +
                 session_id_header + " " * (session_id_maxlen - len(session_id_header)) + "    " +
-                backup_id_header + " " * (backup_id_maxlen - len(backup_id_header)) + "    " +
-                shorthash_header + " " * (shorthash_maxlen - len(shorthash_header)) + "    " +
-                # longhash_header + " " * (longhash_maxlen - len(longhash_header)) + "    " +
-                desc_header
+                backup_id_header + " " * (backup_id_maxlen - len(backup_id_header)) + "    "
         )
+        if not with_long_hashes:
+            header_str += shorthash_header + " " * (shorthash_maxlen - len(shorthash_header)) + "    "
+        else:
+            header_str += longhash_header + " " * (longhash_maxlen - len(longhash_header)) + "    "
+        header_str += desc_header
 
         print(f"Displaying {num_backups} backup(s) across {num_sessions} session(s):\n")
         print(header_str)
@@ -385,29 +413,23 @@ class ListCommands:
             if len(backup_info) == 0:
                 pass
 
-            b0 = backup_info[0]
-            first_info_string = (
-                    "    " +
-                    b0.session_id + " " * (session_id_maxlen - len(b0.session_id)) + "    " +
-                    b0.backup_id + " " * (backup_id_maxlen - len(b0.backup_id)) + "    " +
-                    b0.contents_shorthash + " " * (shorthash_maxlen - len(b0.contents_shorthash)) + "    " +
-                    # b0.contents_hash + " " * (longhash_maxlen - len(b.contents_hash)) + "    " +
-                    b0.description
-            )
-            print(first_info_string)
+            for i in range(len(backup_info)):
+                bi = backup_info[i]
 
-            if len(backup_info) >= 2:
-                remaining_info_strings = [
-                    "    " +
-                    " " * backup_id_maxlen + "    " +
-                    b.backup_id + " " * (backup_id_maxlen - len(b.backup_id)) + "    " +
-                    b.contents_shorthash + " " * (shorthash_maxlen - len(b.contents_shorthash)) + "    " +
-                    # b0.contents_hash + " " * (longhash_maxlen - len(b.contents_hash)) + "    " +
-                    b.description
-                    for b in backup_info[1:]
-                ]
-                for s in remaining_info_strings:
-                    print(s)
+                main_info_string = bi.backup_id + " " * (backup_id_maxlen - len(bi.backup_id)) + "    "
+                if not with_long_hashes:
+                    main_info_string += bi.contents_shorthash + " " * (shorthash_maxlen - len(bi.contents_shorthash)) + "    "
+                else:
+                    main_info_string += bi.contents_hash + " " * (longhash_maxlen - len(bi.contents_hash)) + "    "
+                main_info_string += bi.description
+
+                # Only print the session id once, so long lists are easier to read
+                if i == 0:
+                    info_prefix = "    " + bi.session_id + " " * (session_id_maxlen - len(bi.session_id)) + "    "
+                else:
+                    info_prefix = "    " + " " * backup_id_maxlen + "    "
+
+                print(info_prefix + main_info_string)
 
     @staticmethod
     def print_session_backup_info(tool_config: ToolConfig, args: argparse.Namespace):
@@ -418,8 +440,7 @@ class ListCommands:
             print(f"No backups found for session {session_id}...")
             return
 
-        ListCommands.print_selected_backup_info(selected_backup_info)
-
+        ListCommands.print_selected_backup_info(selected_backup_info, with_long_hashes=args.with_long_hashes)
 
     @staticmethod
     def print_past_backups(tool_config: ToolConfig, args: argparse.Namespace):
@@ -437,7 +458,7 @@ class ListCommands:
             selected_session_ids = all_session_ids[-args.n:]
             selected_backup_info = [b for b in all_backup_info if b.session_id in set(selected_session_ids)]
 
-        ListCommands.print_selected_backup_info(selected_backup_info)
+        ListCommands.print_selected_backup_info(selected_backup_info, with_long_hashes=args.with_long_hashes)
 
 
 class BackupCommands:
@@ -564,11 +585,17 @@ class ModifyCommands:
         selected_backups = ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
 
         if args.backup_id is not None:
-            backup_info = next(filter(lambda b: b.backup_id == args.backup_id, selected_backups))
+            backup_info = list(filter(lambda b: b.backup_id == args.backup_id, selected_backups))
         elif args.short_hash is not None:
-            backup_info = next(filter(lambda b: b.contents_shorthash == args.short_hash, selected_backups))
+            backup_info = list(filter(lambda b: b.contents_shorthash == args.short_hash, selected_backups))
         else:
-            backup_info = next(filter(lambda b: b.contents_hash == args.long_hash, selected_backups))
+            backup_info = list(filter(lambda b: b.contents_hash == args.long_hash, selected_backups))
+
+        if len(backup_info) == 0:
+            print("No backups found...")
+            return
+        else:
+            backup_info = backup_info[0]
 
         print("Found specified backup:")
         print(f"    Session ID: {backup_info.session_id}")
@@ -601,10 +628,16 @@ class DeleteCommands:
     def run_session_delete(tool_config: ToolConfig, args: argparse.Namespace):
         selected_backups = ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
         ListCommands.print_selected_backup_info(selected_backups)
+        if len(selected_backups) == 0:
+            return
 
         paths_to_delete = [b.backup_path(tool_config) for b in selected_backups]
+
+        base_path = tool_config.backup_data_path.parent
+        short_paths_to_delete = [".../" + str(p.relative_to(base_path)) for p in paths_to_delete]
+
         print(f"\nWill delete {len(paths_to_delete)} paths:")
-        for p in paths_to_delete:
+        for p in short_paths_to_delete:
             print(f"    {p}")
 
         response = input("\nCONFIRM [y/N]: ").lower()
@@ -624,11 +657,17 @@ class DeleteCommands:
         selected_backups = ListCommands.retrieve_session_backup_info(tool_config, args.session_id)
 
         if args.backup_id is not None:
-            backup_info = next(filter(lambda b: b.backup_id == args.backup_id, selected_backups))
+            backup_info = list(filter(lambda b: b.backup_id == args.backup_id, selected_backups))
         elif args.short_hash is not None:
-            backup_info = next(filter(lambda b: b.contents_shorthash == args.short_hash, selected_backups))
+            backup_info = list(filter(lambda b: b.contents_shorthash == args.short_hash, selected_backups))
         else:
-            backup_info = next(filter(lambda b: b.contents_hash == args.long_hash, selected_backups))
+            backup_info = list(filter(lambda b: b.contents_hash == args.long_hash, selected_backups))
+
+        if len(backup_info) == 0:
+            print("No backups found...")
+            return
+        else:
+            backup_info = backup_info[0]
 
         print("Found specified backup:")
         print(f"    Session ID: {backup_info.session_id}")
@@ -638,7 +677,10 @@ class DeleteCommands:
         print(f"    Description: {backup_info.description}")
 
         path_to_delete = backup_info.backup_path(tool_config)
-        print(f"\nPath to delete: {path_to_delete}")
+        base_path = tool_config.backup_data_path.parent
+        short_path_to_delete = ".../" + str(path_to_delete.relative_to(base_path))
+
+        print(f"\nPath to delete: {short_path_to_delete}")
         response = input("\nCONFIRM [y/N]: ").lower()
         if response == 'y' or response == 'yes':
             print(f"Deleting {path_to_delete}...")
@@ -662,9 +704,42 @@ def init_parser():
         version=f'%(prog)s {__version__}'
     )
 
+    # === reusable arguments for picking a session and backup ===
+    backup_selection_parent = argparse.ArgumentParser(add_help=False)
+    backup_selection_parent.add_argument(
+        "session_id",
+        help="the session ID to modify",
+        type=str,
+    )
+    backup_selection_group = backup_selection_parent.add_mutually_exclusive_group(required=True)
+    backup_selection_group.add_argument(
+        "-b", "--backup_id",
+        help="the backup ID to modify",
+        type=str,
+    )
+    backup_selection_group.add_argument(
+        "-s", "--short-hash",
+        help="the short-hash to modify",
+        type=str,
+    )
+    backup_selection_group.add_argument(
+        "-l", "--long-hash",
+        help="the long-hash to modify",
+        type=str,
+    )
+
+    # === reusable argument for using long hashes instead of short hashes
+    long_hash_parent = argparse.ArgumentParser(add_help=False)
+    long_hash_parent.add_argument(
+        "--with-long-hashes",
+        help="show the complete SHA1 hashes",
+        action="store_true"
+    )
+
     # === CONFIG COMMANDS ===
     config_parser = subparsers.add_parser("config", help=f"set {__config_name__} values from the command line")
     config_subparsers = config_parser.add_subparsers()
+
     # = config print =
     config_print_parser = config_subparsers.add_parser(
         "print",
@@ -690,7 +765,13 @@ def init_parser():
     config_parser.set_defaults(func=ConfigCommands.edit_config)
 
     # === LIST COMMANDS ===
-    list_parser = subparsers.add_parser("list", help="list available session IDs, backup IDs, and hashes")
+    list_parser = subparsers.add_parser(
+        "list",
+        help="list available session IDs, backup IDs, and hashes",
+        parents=[long_hash_parent]
+    )
+    list_subparsers = list_parser.add_subparsers()
+
     # = list =
     list_parser.add_argument(
         "-b",
@@ -704,9 +785,12 @@ def init_parser():
     )
     list_parser.set_defaults(func=ListCommands.print_past_backups)
 
-    list_subparsers = list_parser.add_subparsers()
     # = list session =
-    list_session_parser = list_subparsers.add_parser("session", help="display backups for a specific session ID")
+    list_session_parser = list_subparsers.add_parser(
+        "session",
+        help="display backups for a specific session ID",
+        parents=[long_hash_parent]
+    )
     list_session_parser.add_argument(
         "session_id",
         type=str
@@ -715,6 +799,8 @@ def init_parser():
 
     # === BACKUP COMMANDS ===
     backup_parser = subparsers.add_parser("backup", help="create a new backup from the specified slot")
+
+    # = backup =
     backup_parser.add_argument(
         "slot_id",
         help="the save slot to backup (default: 0)",
@@ -733,28 +819,13 @@ def init_parser():
     backup_parser.set_defaults(func=BackupCommands.run_backup_command)
 
     # === RESTORE COMMANDS ===
-    restore_parser = subparsers.add_parser("restore", help="restore the specified backup to the specified slot")
-    restore_parser.add_argument(
-        "session_id",
-        help="the session ID to restore",
-        type=str,
+    restore_parser = subparsers.add_parser(
+        "restore",
+        help="restore the specified backup to the specified slot",
+        parents=[backup_selection_parent]
     )
-    restore_group = restore_parser.add_mutually_exclusive_group(required=True)
-    restore_group.add_argument(
-        "-b", "--backup_id",
-        help="the backup ID to restore",
-        type=str,
-    )
-    restore_group.add_argument(
-        "-s", "--short-hash",
-        help="the short-hash to restore",
-        type=str,
-    )
-    restore_group.add_argument(
-        "-l", "--long-hash",
-        help="the long-hash to restore",
-        type=str,
-    )
+
+    # = restore =
     restore_parser.add_argument(
         "slot_id",
         help="the save slot to restore to (default: 0)",
@@ -774,6 +845,7 @@ def init_parser():
     # === MODIFY COMMANDS ===
     modify_parser = subparsers.add_parser("modify", help="modify an existing backup in-place")
     modify_subparsers = modify_parser.add_subparsers()
+
     # = modify all =
     modify_all_parser = modify_subparsers.add_parser("all", help="modify all backups")
     modify_all_parser.add_argument(
@@ -782,31 +854,11 @@ def init_parser():
         action="store_true"
     )
     modify_all_parser.set_defaults(func=ModifyCommands.modify_all)
+
     # = modify session =
     #   note: I chose "session" instead of "backup" because "backup" is already an important subcommand
     #   the first argument is also a session id, so this choice makes the command read better as a bonus
-    modify_session_parser = modify_subparsers.add_parser("session")
-    modify_session_parser.add_argument(
-        "session_id",
-        help="the session ID to modify",
-        type=str,
-    )
-    modify_identifier_group = modify_session_parser.add_mutually_exclusive_group(required=True)
-    modify_identifier_group.add_argument(
-        "-b", "--backup_id",
-        help="the backup ID to modify",
-        type=str,
-    )
-    modify_identifier_group.add_argument(
-        "-s", "--short-hash",
-        help="the short-hash to modify",
-        type=str,
-    )
-    modify_identifier_group.add_argument(
-        "-l", "--long-hash",
-        help="the long-hash to modify",
-        type=str,
-    )
+    modify_session_parser = modify_subparsers.add_parser("session", parents=[backup_selection_parent])
     modify_session_parser.add_argument(
         "--hash",
         help="recompute the hash for the backup, in case you've modified the contents",
@@ -823,6 +875,8 @@ def init_parser():
     #  note: this subcommand is verbose on purpose, so it's a bit harder to accidentally delete stuff
     delete_parser = subparsers.add_parser("delete", help="delete archived sessions and backups")
     delete_session_subparsers = delete_parser.add_subparsers()
+
+    # = delete session =
     delete_session_parser = delete_session_subparsers.add_parser(
         "session",
         help="delete all backups for the given session"
@@ -834,35 +888,16 @@ def init_parser():
     )
     delete_session_parser.set_defaults(func=DeleteCommands.run_session_delete)
 
+    # = delete backup =
     delete_backup_subparser = delete_session_subparsers.add_parser(
         "backup",
-        help="delete a specified backup for a specified session"
-    )
-    delete_backup_group = delete_backup_subparser.add_argument_group()
-    delete_backup_group.add_argument(
-        "session_id",
-        help="the session ID to modify",
-        type=str,
-    )
-    delete_backup_subgroup = delete_backup_group.add_mutually_exclusive_group(required=True)
-    delete_backup_subgroup.add_argument(
-        "-b", "--backup_id",
-        help="the backup ID to modify",
-        type=str,
-    )
-    delete_backup_subgroup.add_argument(
-        "-s", "--short-hash",
-        help="the short-hash to modify",
-        type=str,
-    )
-    delete_backup_subgroup.add_argument(
-        "-l", "--long-hash",
-        help="the long-hash to modify",
-        type=str,
+        help="delete a specified backup for a specified session",
+        parents=[backup_selection_parent]
     )
     delete_backup_subparser.set_defaults(func=DeleteCommands.run_backup_delete)
 
     return parser
+
 
 
 if __name__ == "__main__":
@@ -870,18 +905,11 @@ if __name__ == "__main__":
     # TODO: Add safety checks for collided short hashes
     # TODO: Add safety-confirmation for Nolla_Games_Noita path
     # TODO: Add option to rebuild entire backup_info.txt
-    # TODO: Add option to display long hashes in list command
 
     created_parser = init_parser()
     parsed_args = created_parser.parse_args()
 
     loaded_tool_config = ConfigCommands.get_or_create_config(parsed_args)
 
-    # I forgot why I added this try/catch block, and now I can't reproduce the error that motivated it.
-    # try:
     func = parsed_args.func
-    # except AttributeError:
-    #     func = None
-    #     created_parser.error("too few arguments")
-
     func(loaded_tool_config, parsed_args)
